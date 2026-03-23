@@ -1,0 +1,13 @@
+{
+  "functions": {
+    "api/react.py": {
+      "runtime": "python3.9"
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/react",
+      "dest": "api/react.py"
+    }
+  ]
+}
