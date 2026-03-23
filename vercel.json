@@ -1,13 +1,8 @@
 {
   "functions": {
     "api/react.py": {
-      "runtime": "python3.9"
+      "runtime": "@vercel/python@3.11"
     }
-  },
-  "routes": [
-    {
-      "src": "/api/react",
-      "dest": "api/react.py"
-    }
-  ]
+  }
 }
+
