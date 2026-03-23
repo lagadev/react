@@ -2,9 +2,9 @@ import json
 import time
 import random
 import requests
-from http.server import BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# 🔐 আপনার bot tokens এখানে বসান (env use করলে ভালো)
+# 🔐 Bot Tokens (env use করা better)
 BOT_TOKENS = [
     "8640658980:AAHNEh-ZHU5CwwiS5_Ak3ywrsEeWgrQsfP4",
     "8320276149:AAFznZ1LQqeXjfTYoxc8SFYr1yNCDfu7EmY",
@@ -12,19 +12,34 @@ BOT_TOKENS = [
     "8548195103:AAHXuYSKaur4oDoOVjcQ0LzvwfsjN4Ha-Yc"
 ]
 
-# 😊 Default emoji list
+# 😊 Emoji list
 EMOJIS = [
     "🌟", "💖", "🔥", "🎉", "✨", "😍", "👏",
     "💯", "⚡", "🏆", "💎", "🙌", "🤝", "😎"
 ]
 
 
-class handler(BaseHTTPRequestHandler):
+class Handler(BaseHTTPRequestHandler):
+
+    # ✅ GET request (browser test এর জন্য)
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+
+        response = {
+            "status": "running",
+            "message": "Server is working. Use POST to send reactions."
+        }
+
+        self.wfile.write(json.dumps(response).encode())
+
+    # ✅ POST request (main logic)
     def do_POST(self):
         try:
-            # Request body read
-            content_length = int(self.headers['Content-Length'])
+            content_length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_length)
+
             data = json.loads(body)
 
             chat_id = data.get("chat_id")
@@ -41,7 +56,7 @@ class handler(BaseHTTPRequestHandler):
             failed = 0
 
             # Limit count
-            tokens = BOT_TOKENS[:count]
+            tokens = BOT_TOKENS[:min(count, len(BOT_TOKENS))]
 
             for token in tokens:
                 try:
@@ -68,13 +83,13 @@ class handler(BaseHTTPRequestHandler):
                     else:
                         failed += 1
 
-                    # ⏱️ ছোট delay (rate limit avoid)
+                    # ছোট delay (rate limit avoid)
                     time.sleep(0.2)
 
-                except:
+                except Exception as e:
                     failed += 1
 
-            # Response
+            # ✅ Response
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
@@ -91,3 +106,15 @@ class handler(BaseHTTPRequestHandler):
             self.send_response(500)
             self.end_headers()
             self.wfile.write(str(e).encode())
+
+
+# ✅ Server run
+def run(server_class=HTTPServer, handler_class=Handler, port=8000):
+    server_address = ('', port)
+    httpd = server_class(server_address, handler_class)
+    print(f"🚀 Server running on port {port}")
+    httpd.serve_forever()
+
+
+if __name__ == "__main__":
+    run()
