@@ -6,10 +6,10 @@ from http.server import BaseHTTPRequestHandler
 
 # 🔐 আপনার bot tokens এখানে বসান (env use করলে ভালো)
 BOT_TOKENS = [
-    "BOT_TOKEN_1",
-    "BOT_TOKEN_2",
-    "BOT_TOKEN_3",
-    "BOT_TOKEN_4"
+    "8640658980:AAHNEh-ZHU5CwwiS5_Ak3ywrsEeWgrQsfP4",
+    "8320276149:AAFznZ1LQqeXjfTYoxc8SFYr1yNCDfu7EmY",
+    "8564269804:AAEa_v9pipRUt2YRjVXeAZ3ExzDOfd6cahE",
+    "8548195103:AAHXuYSKaur4oDoOVjcQ0LzvwfsjN4Ha-Yc"
 ]
 
 # 😊 Default emoji list
