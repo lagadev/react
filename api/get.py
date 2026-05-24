@@ -1,228 +1,165 @@
-"""
-LagahReact — Telegram Reaction Sender API
-Pyrogram-based. No API_ID/API_HASH needed in environment.
-All credentials stored inside session strings.
-"""
-
-import os
 import re
 import json
 import asyncio
 import logging
+import os
 from http.server import BaseHTTPRequestHandler
-from pyrogram import Client
-from pyrogram.errors import RPCError
+from urllib.parse import urlparse, parse_qs
+from telethon import TelegramClient, functions, types
+from telethon.sessions import StringSession
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("lagahreact")
+logger = logging.getLogger(__name__)
 
-# ─── Load sessions from session.json ───────────────────────
-SESSIONS_FILE = os.path.join(os.path.dirname(__file__), "session.json")
-SESSIONS = {}
-
-if os.path.exists(SESSIONS_FILE):
-    try:
-        with open(SESSIONS_FILE, "r") as f:
-            SESSIONS = json.load(f)
-        logger.info(f"Loaded {len(SESSIONS)} session(s) from session.json")
-    except Exception as e:
-        logger.error(f"Failed to load session.json: {e}")
-else:
-    logger.warning("session.json not found! Create it with phone:session pairs.")
-
-# ─── Telegram link parser ──────────────────────────────────
-LINK_PATTERNS = [
-    re.compile(r"t\.me/([a-zA-Z0-9_]{5,})/(\d+)"),
-    re.compile(r"t\.me/c/(-?\d+)/(\d+)"),
-    re.compile(r"t\.me/c/(\d+)/(\d+)"),
-]
+# POSITIVE reactions only - Telegram's standard positive reaction set
+POSITIVE_REACTIONS = ["👍", "❤️", "🔥", "🎉", "🤩", "😁", "🥰", "👏", "🤯", "🚀", "💯", "🎊", "✨", "💪", "🫡", "😎"]
 
 
-def parse_link(link: str):
-    """Parse Telegram message link to get target and message ID."""
-    for pattern in LINK_PATTERNS:
-        match = pattern.search(link)
+def load_sessions():
+    """Load all accounts from session.json"""
+    session_path = os.path.join(os.path.dirname(__file__), '..', 'session.json')
+    if not os.path.exists(session_path):
+        return []
+    with open(session_path, 'r') as f:
+        data = json.load(f)
+    return data.get('accounts', [])
+
+
+def parse_telegram_link(link: str):
+    """Parse a Telegram message link into peer and message_id"""
+    patterns = [
+        r'(?:https?://)?t\.me/([^/]+)/(\d+)',
+        r'(?:https?://)?telegram\.me/([^/]+)/(\d+)',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, link)
         if match:
-            groups = match.groups()
-            if link.find("/c/") != -1:
-                peer = int(groups[0])
-                # Private supergroups need -100 prefix
-                if peer > 0 and str(peer)[0] != "-":
-                    peer = int(f"-100{peer}")
-                return peer, int(groups[1])
-            else:
-                return groups[0], int(groups[1])
+            return match.group(1), int(match.group(2))
     return None, None
 
 
-async def send_reaction(session_str: str, target, msg_id: int, emoji: str):
-    """
-    Send a reaction to a Telegram message using Pyrogram.
-    Pyrogram's export_session_string() contains API_ID/API_HASH internally.
-    """
-    app = Client(
-        name="reaction_bot",
-        session_string=session_str,
-        in_memory=True
-    )
+async def send_reaction(client, peer, msg_id, emoji):
+    """Send a single reaction to a message"""
     try:
-        await app.start()
-        me = await app.get_me()
-
-        # Resolve peer
-        if isinstance(target, int):
-            chat = await app.get_chat(target)
-        else:
-            chat = await app.get_chat(target)
-
-        # Send reaction using Pyrogram's message.react()
-        # Pyrogram uses sendReaction under the hood
-        await app.send_reaction(
-            chat_id=chat.id,
-            message_id=msg_id,
-            emoji=emoji
-        )
-
-        await app.stop()
-        return {
-            "ok": True,
-            "message": f"Reacted {emoji} as {me.first_name or me.username or 'Unknown'}",
-            "account": me.first_name or str(me.id)
-        }
-
-    except RPCError as e:
-        try:
-            await app.stop()
-        except:
-            pass
-        return {"ok": False, "error": f"Telegram error: {e.MESSAGE or str(e)}"}
+        await client(functions.messages.SendReactionRequest(
+            peer=peer,
+            msg_id=msg_id,
+            reaction=[types.ReactionEmoji(emoticon=emoji)]
+        ))
+        return True, None
     except Exception as e:
-        try:
-            await app.stop()
-        except:
-            pass
-        return {"ok": False, "error": str(e)}
+        return False, str(e)
+
+
+async def process_account(account, peer, msg_id, reaction_index):
+    """Initialize account and send assigned reaction"""
+    phone = account.get('phone', 'unknown')
+    api_id = account.get('api_id')
+    api_hash = account.get('api_hash')
+    session_string = account.get('session_string')
+    assigned_emoji = account.get('reaction') or POSITIVE_REACTIONS[reaction_index % len(POSITIVE_REACTIONS)]
+
+    if not api_id or not api_hash:
+        return {'phone': phone, 'status': 'error', 'error': 'Missing api_id/api_hash'}
+
+    try:
+        if session_string:
+            client = TelegramClient(StringSession(session_string), int(api_id), api_hash)
+        else:
+            client = TelegramClient(f'session_{phone}', int(api_id), api_hash)
+
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            return {'phone': phone, 'status': 'error', 'error': 'Not authorized'}
+
+        success, err = await send_reaction(client, peer, msg_id, assigned_emoji)
+        await client.disconnect()
+
+        if success:
+            return {'phone': phone, 'status': 'success', 'reaction': assigned_emoji}
+        else:
+            return {'phone': phone, 'status': 'error', 'error': err}
+
+    except Exception as e:
+        return {'phone': phone, 'status': 'error', 'error': str(e)}
+
+
+async def handle_reactions(link, emoji=None):
+    """React to a message with all accounts — each gets a positive reaction"""
+    peer, msg_id = parse_telegram_link(link)
+    if not peer or not msg_id:
+        return {'error': 'Invalid Telegram link. Use: https://t.me/username/123'}
+
+    accounts = load_sessions()
+    if not accounts:
+        return {'error': 'No accounts in session.json'}
+
+    # If a specific reaction is given, use the same for all
+    # Otherwise distribute positive reactions across accounts
+    if emoji:
+        tasks = [process_account(acc, peer, msg_id, 0) for acc in accounts]
+        # Override with the user-specified emoji
+        for i, acc in enumerate(accounts):
+            accounts[i] = {**acc, 'reaction': emoji}
+        tasks = [process_account(accounts[i], peer, msg_id, 0) for i in range(len(accounts))]
+    else:
+        tasks = [process_account(acc, peer, msg_id, i) for i, acc in enumerate(accounts)]
+
+    results = await asyncio.gather(*tasks)
+
+    total = len(results)
+    success = sum(1 for r in results if r['status'] == 'success')
+    failed = total - success
+
+    return {
+        'status': 'completed',
+        'total_accounts': total,
+        'success': success,
+        'failed': failed,
+        'results': results
+    }
 
 
 class handler(BaseHTTPRequestHandler):
+    """Vercel serverless function"""
 
     def do_GET(self):
-        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
 
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
+        link = params.get('link', [None])[0]
+        if not link:
+            self._respond(400, {
+                'error': 'Missing "link" parameter',
+                'usage': '/get?link=https://t.me/username/message_id',
+                'example': '/get?link=https://t.me/devlagabio/119'
+            })
+            return
 
+        emoji = params.get('reaction', [None])[0]
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            parsed = urlparse(self.path)
-            params = parse_qs(parsed.query)
-
-            # Logging
-            logger.info(f"Request: {self.path}")
-
-            # Endpoint check
-            if parsed.path not in ("/get", "/reaction", "/"):
-                self.wfile.write(json.dumps({
-                    "ok": False,
-                    "error": "Invalid endpoint. Use /get?link=...&emoji=...&account=..."
-                }).encode())
-                return
-
-            # ─── List accounts if no link provided ───
-            link = params.get("link", [None])[0]
-            if not link:
-                if SESSIONS:
-                    account_list = list(SESSIONS.keys())
-                    self.wfile.write(json.dumps({
-                        "ok": True,
-                        "message": "Available accounts",
-                        "accounts": account_list,
-                        "usage": "/get?link=https://t.me/username/123&emoji=👍&account=+8801829507129"
-                    }, indent=2).encode())
-                else:
-                    self.wfile.write(json.dumps({
-                        "ok": False,
-                        "error": "No sessions loaded. Check session.json"
-                    }).encode())
-                return
-
-            # ─── Get emoji ───
-            emoji = params.get("emoji", ["👍"])[0]
-
-            # ─── Get account (phone number) ───
-            account = params.get("account", [None])[0]
-            session_str = None
-
-            if account:
-                # Specific account requested
-                if account in SESSIONS:
-                    session_str = SESSIONS[account]
-                    logger.info(f"Using account: {account}")
-                else:
-                    self.wfile.write(json.dumps({
-                        "ok": False,
-                        "error": f"Account '{account}' not found. Available: {list(SESSIONS.keys())}"
-                    }).encode())
-                    return
-            else:
-                # Use first available session
-                if SESSIONS:
-                    first_key = list(SESSIONS.keys())[0]
-                    session_str = SESSIONS[first_key]
-                    account = first_key
-                    logger.info(f"No account specified, using: {account}")
-                else:
-                    self.wfile.write(json.dumps({
-                        "ok": False,
-                        "error": "No sessions loaded"
-                    }).encode())
-                    return
-
-            # ─── Parse link ───
-            target, msg_id = parse_link(link)
-            if not target or not msg_id:
-                self.wfile.write(json.dumps({
-                    "ok": False,
-                    "error": f"Invalid Telegram link: {link}. Format: https://t.me/username/123"
-                }).encode())
-                return
-
-            # ─── Send reaction ───
-            logger.info(f"Sending {emoji} to {target}/{msg_id} using {account}")
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(send_reaction(session_str, target, msg_id, emoji))
+            result = loop.run_until_complete(handle_reactions(link, emoji))
+        finally:
             loop.close()
 
-            # ─── Build response ───
-            response = {
-                "ok": result["ok"],
-                "emoji": emoji,
-                "target": str(target),
-                "message_id": msg_id,
-                "link": link,
-                "account_used": account,
-            }
-            if result.get("message"):
-                response["message"] = result["message"]
-            if result.get("error"):
-                response["error"] = result["error"]
+        self._respond(200, result)
 
-            self.wfile.write(json.dumps(response, indent=2, ensure_ascii=False).encode())
-
-        except Exception as e:
-            logger.error(f"Unhandled error: {e}")
-            self.wfile.write(json.dumps({
-                "ok": False,
-                "error": f"Server error: {str(e)}"
-            }).encode())
+    def _respond(self, status_code, data):
+        body = json.dumps(data, indent=2).encode()
+        self.send_response(status_code)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_OPTIONS(self):
         self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
